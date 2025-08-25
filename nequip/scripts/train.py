@@ -1,6 +1,37 @@
 # This file is a part of the `nequip` package. Please see LICENSE and README at the root for information on using it.
 """Train a network."""
 
+# NOTE: ByteW&B / wandb requirement bypass
+# Some environments use a drop-in replacement (e.g., bytewandb) or have a
+# module-only install without dist-info metadata. Lightning's WandbLogger
+# enforces `RequirementCache("wandb>=...")`, which fails if dist-info is
+# missing even when a compatible module is importable.
+#
+# To support such setups, we monkey patch RequirementCache to consider any
+# requirement starting with "wandb" as available. This only affects this
+# process and avoids forcing the official `wandb` package install.
+try:  # be robust to API differences or missing dependency
+    from lightning_utilities.core.imports import RequirementCache  # type: ignore
+
+    _old_check_available = RequirementCache._check_available  # type: ignore[attr-defined]
+
+    def _nequip_allow_bytewandb(self):  # noqa: ANN001
+        req = getattr(self, "requirement", None)
+        if isinstance(req, str) and req.startswith("wandb"):
+            # Consider the requirement met; downstream code will import the
+            # actual module (e.g., a shim that proxies to bytewandb).
+            self.available = True
+            # Keep a friendly message for potential logging/str(self)
+            self.message = f"Requirement {req!r} met"
+            return
+        # Fallback to the original logic for all other requirements
+        return _old_check_available(self)
+
+    RequirementCache._check_available = _nequip_allow_bytewandb  # type: ignore[assignment]
+except Exception:
+    # If lightning_utilities is absent or changes API, silently skip the patch.
+    pass
+
 import torch
 import warnings
 

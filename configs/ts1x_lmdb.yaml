@@ -1,0 +1,213 @@
+# yamllint disable rule:line-length
+# LMDB-based training config for ts1x dataset (train/val).
+# NOTE: Update `chemical_symbols` to match your dataset species order.
+
+# ===========
+#     RUN
+# ===========
+run: [train, test]
+
+# Shared hyperparams
+cutoff_radius: 5.0
+num_layers: 4
+l_max: 1
+num_features: 32
+
+# IMPORTANT: set to your dataset species (order defines type_names)
+# Example below is a placeholder — change it to your data (e.g., [H, C, O])
+chemical_symbols: [H, C, O]
+model_type_names: ${chemical_symbols}
+
+monitored_metric: val0_epoch/weighted_sum
+
+# ============
+#     DATA
+# ============
+data:
+  _target_: nequip.data.datamodule.NequIPDataModule
+  seed: 456
+
+  # Direct LMDB datasets for train/val
+  train_dataset:
+    _target_: nequip.data.dataset.lmdb_dataset.NequIPLMDBDataset
+    file_path: archive/ts1x-train.lmdb
+    transforms:
+      # Compute neighbor list on the fly
+      - _target_: nequip.data.transforms.NeighborListTransform
+        r_max: ${cutoff_radius}
+
+  val_dataset:
+    _target_: nequip.data.dataset.lmdb_dataset.NequIPLMDBDataset
+    file_path: archive/ts1x-val.lmdb
+    transforms:
+      - _target_: nequip.data.transforms.NeighborListTransform
+        r_max: ${cutoff_radius}
+
+  # Dataloaders
+  train_dataloader:
+    _target_: torch.utils.data.DataLoader
+    batch_size: 2
+    num_workers: 4
+    shuffle: true
+  val_dataloader:
+    _target_: torch.utils.data.DataLoader
+    batch_size: 4
+    num_workers: ${data.train_dataloader.num_workers}
+
+  # Dataset statistics for normalization/scaling
+  stats_manager:
+    _target_: nequip.data.CommonDataStatisticsManager
+    dataloader_kwargs:
+      batch_size: 8
+    type_names: ${model_type_names}
+
+# =============
+#    TRAINER
+# =============
+trainer:
+  _target_: lightning.Trainer
+  accelerator: gpu
+  enable_checkpointing: true
+  max_epochs: 1000
+  max_time: 03:00:00:00
+  log_every_n_steps: 20
+  logger:
+    _target_: lightning.pytorch.loggers.wandb.WandbLogger
+    project: nequip
+    name: ts1x_lmdb
+    save_dir: ${hydra:runtime.output_dir}
+  callbacks:
+    - _target_: lightning.pytorch.callbacks.EarlyStopping
+      monitor: ${monitored_metric}
+      min_delta: 1e-3
+      patience: 20
+    - _target_: lightning.pytorch.callbacks.ModelCheckpoint
+      monitor: ${monitored_metric}
+      dirpath: ${hydra:runtime.output_dir}
+      filename: best
+      save_last: true
+    - _target_: lightning.pytorch.callbacks.LearningRateMonitor
+      logging_interval: epoch
+
+# =====================
+#    TRAINING MODULE
+# =====================
+# Default: energy+forces loss. If you have full Hessian labels under key `hessian`,
+# you can switch to EFH full-Hessian training by replacing the block below with the
+# commented EFH version further down.
+training_module:
+  _target_: nequip.train.EMALightningModule
+  ema_decay: 0.999
+
+  loss:
+    _target_: nequip.train.EnergyForceLoss
+    per_atom_energy: true
+    coeffs:
+      total_energy: 1.0
+      forces: 1.0
+
+  val_metrics:
+    _target_: nequip.train.EnergyForceMetrics
+    coeffs:
+      total_energy_mae: 1.0
+      forces_mae: 1.0
+  train_metrics: ${training_module.val_metrics}
+  test_metrics: ${training_module.val_metrics}
+
+  optimizer:
+    _target_: torch.optim.Adam
+    lr: 0.01
+
+  lr_scheduler:
+    scheduler:
+      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+      factor: 0.6
+      patience: 5
+      threshold: 0.2
+      min_lr: 1e-6
+    monitor: ${monitored_metric}
+    interval: epoch
+    frequency: 1
+
+  model:
+    _target_: nequip.model.NequIPGNNModel
+    compile_mode: compile
+    seed: 456
+    model_dtype: float32
+    type_names: ${model_type_names}
+    r_max: ${cutoff_radius}
+    num_bessels: 8
+    bessel_trainable: false
+    polynomial_cutoff_p: 6
+    num_layers: ${num_layers}
+    l_max: ${l_max}
+    parity: true
+    num_features: ${num_features}
+
+    # Data-driven init
+    avg_num_neighbors: ${training_data_stats:num_neighbors_mean}
+    per_type_energy_scales: ${training_data_stats:per_type_forces_rms}
+    per_type_energy_shifts: ${training_data_stats:per_atom_energy_mean}
+    per_type_energy_scales_trainable: false
+    per_type_energy_shifts_trainable: false
+
+    # Optional ZBL prior
+    pair_potential:
+      _target_: nequip.nn.pair_potential.ZBL
+      units: metal
+      chemical_species: ${chemical_symbols}
+
+# ===============================
+#   (Optional) Full Hessian Loss
+# ===============================
+# To enable full-Hessian supervised training (requires LMDB entries to include
+# key `hessian` as (D,D) or flat D*D or (N,3,N,3)), replace `training_module`
+# above with the block below:
+#
+# training_module:
+#   _target_: nequip.train.EFHFullHessianLightningModule
+#   ema_decay: 0.999
+#   hessian_weight: 0.05
+#   hessian_supervised: true
+#   hessian_target_key: hessian
+#   dtype_for_hessian: float64
+#
+#   loss:
+#     _target_: nequip.train.EnergyForceLoss
+#     per_atom_energy: true
+#     coeffs: { total_energy: 1.0, forces: 1.0 }
+#
+#   val_metrics: { _target_: nequip.train.EnergyForceMetrics, coeffs: { total_energy_mae: 1.0, forces_mae: 1.0 } }
+#   train_metrics: ${training_module.val_metrics}
+#   test_metrics: ${training_module.val_metrics}
+#
+#   optimizer: { _target_: torch.optim.Adam, lr: 0.005 }
+#   lr_scheduler:
+#     scheduler: { _target_: torch.optim.lr_scheduler.ReduceLROnPlateau, factor: 0.6, patience: 5, threshold: 0.2, min_lr: 1e-6 }
+#     monitor: ${monitored_metric}
+#     interval: epoch
+#     frequency: 1
+#
+#   model:
+#     _target_: nequip.model.NequIPGNNModel
+#     compile_mode: compile
+#     seed: 456
+#     model_dtype: float64
+#     type_names: ${model_type_names}
+#     r_max: ${cutoff_radius}
+#     num_bessels: 8
+#     bessel_trainable: false
+#     polynomial_cutoff_p: 6
+#     num_layers: ${num_layers}
+#     l_max: ${l_max}
+#     parity: true
+#     num_features: ${num_features}
+#     avg_num_neighbors: ${training_data_stats:num_neighbors_mean}
+#     per_type_energy_scales: ${training_data_stats:per_type_forces_rms}
+#     per_type_energy_shifts: ${training_data_stats:per_atom_energy_mean}
+#     per_type_energy_scales_trainable: false
+#     per_type_energy_shifts_trainable: false
+#     pair_potential:
+#       _target_: nequip.nn.pair_potential.ZBL
+#       units: metal
+#       chemical_species: ${chemical_symbols}

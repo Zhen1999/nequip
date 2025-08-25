@@ -15,6 +15,7 @@ from .dict import from_dict
 from .ase import from_ase, to_ase
 from ._nl import compute_neighborlist_
 from ._sampler import PartialSampler
+from ._bucket_sampler import BucketByNumAtomsBatchSampler
 from .stats import (
     Count,
     Mean,
@@ -38,6 +39,7 @@ __all__ = [
     "_register_field_prefix",
     "get_field_type",
     "PartialSampler",
+    "BucketByNumAtomsBatchSampler",
     "_NODE_FIELDS",
     "_EDGE_FIELDS",
     "_GRAPH_FIELDS",

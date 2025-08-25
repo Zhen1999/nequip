@@ -260,6 +260,67 @@ class NequIPLightningModule(lightning.LightningModule):
         )
         return loss
 
+    # --- device transfer hooks ---
+    def to(self, *args, **kwargs):  # type: ignore[override]
+        """Override to() so that moving to MPS won't attempt float64 tensors.
+
+        Before delegating to the parent .to(), if the target device is MPS, cast
+        all float64 parameters and buffers to float32 on host to avoid MPS fp64.
+        """
+        target_device = None
+        target_dtype = None
+        args_list = list(args)
+        # detect device in positional args
+        if args_list and isinstance(args_list[0], (torch.device, str)):
+            target_device = torch.device(args_list[0])
+        # detect dtype in positional args
+        for i, a in enumerate(args_list):
+            if isinstance(a, torch.dtype):
+                target_dtype = a
+                break
+        # detect from kwargs
+        if target_device is None and kwargs.get("device") is not None:
+            target_device = torch.device(kwargs["device"])  # type: ignore[arg-type]
+        if target_dtype is None and isinstance(kwargs.get("dtype"), torch.dtype):
+            target_dtype = kwargs.get("dtype")
+
+        if target_device is not None and target_device.type == "mps":
+            # Cast params
+            for p in self.parameters(recurse=True):
+                if p.is_floating_point() and p.dtype == torch.float64:
+                    p.data = p.data.to(torch.float32)
+            # Cast buffers
+            for name, buf in self.named_buffers(recurse=True):
+                if isinstance(buf, torch.Tensor) and buf.is_floating_point() and buf.dtype == torch.float64:
+                    self._buffers[name] = buf.to(torch.float32)
+            # If caller requested dtype=float64, rewrite to float32 to avoid MPS fp64 error
+            if target_dtype is torch.float64:
+                # fix kwargs
+                if "dtype" in kwargs and isinstance(kwargs["dtype"], torch.dtype):
+                    kwargs["dtype"] = torch.float32
+                # fix positional args
+                for i, a in enumerate(args_list):
+                    if isinstance(a, torch.dtype) and a is torch.float64:
+                        args_list[i] = torch.float32
+                        break
+        return super().to(*tuple(args_list), **kwargs)
+
+    def transfer_batch_to_device(
+        self, batch: AtomicDataDict.Type, device: torch.device, dataloader_idx: int
+    ) -> AtomicDataDict.Type:
+        """Move batch to device, with special handling for Apple MPS.
+
+        MPS backend does not support float64 tensors on device; ensure any
+        float64 tensors in the batch are cast to float32 before transfer.
+        """
+        dev = torch.device(device)
+        if dev.type == "mps":
+            # cast float64 -> float32 before transfer
+            for k, v in list(batch.items()):
+                if isinstance(v, torch.Tensor) and v.is_floating_point() and v.dtype == torch.float64:
+                    batch[k] = v.to(dtype=torch.float32)
+        return AtomicDataDict.to_(batch, dev)
+
     def on_train_epoch_end(self):
         """"""
         # optionally compute training metrics

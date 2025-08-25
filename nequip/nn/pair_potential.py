@@ -305,7 +305,7 @@ class ZBL(GraphModuleMixin, torch.nn.Module):
                 {"metal": 14.399645 * (1.0) ** 2, "real": 332.06371 * (1.0) ** 2}[
                     units
                 ],
-                dtype=torch.float64,
+                dtype=torch.get_default_dtype(),
             )
             * 0.5,  # Put half the energy on each of ij, ji
         )

@@ -2,6 +2,7 @@
 from .type_mapper import ChemicalSpeciesToAtomTypeMapper
 from .neighborlist import NeighborListTransform, SortedNeighborListTransform
 from .stress_utils import VirialToStressTransform, StressSignFlipTransform
+from .register_extra import RegisterKeys
 
 __all__ = [
     "ChemicalSpeciesToAtomTypeMapper",
@@ -9,4 +10,5 @@ __all__ = [
     "SortedNeighborListTransform",
     "VirialToStressTransform",
     "StressSignFlipTransform",
+    "RegisterKeys",
 ]

@@ -321,14 +321,24 @@ class NequIPDataModule(lightning.LightningDataModule):
             raise RuntimeError(
                 f"`_target_` is missing from the dataloder dict: {dataloader_dict}"
             )
-        return [
-            instantiate(
-                dataloader_dict,
+        dloaders = []
+        for dataset in datasets:
+            # Allow nested sampler / batch_sampler to be instantiated with dataset injected
+            dcfg = dataloader_dict.copy()
+            if isinstance(dcfg.get("sampler"), (dict,)) and "_target_" in dcfg["sampler"]:
+                dcfg["sampler"] = instantiate(dcfg["sampler"], data_source=dataset)
+            if isinstance(dcfg.get("batch_sampler"), (dict,)) and "_target_" in dcfg["batch_sampler"]:
+                dcfg["batch_sampler"] = instantiate(dcfg["batch_sampler"], dataset=dataset)
+                # batch_sampler and batch_size are mutually exclusive in PyTorch DataLoader
+                dcfg.pop("batch_size", None)
+                dcfg.pop("shuffle", None)
+            dloader = instantiate(
+                dcfg,
                 dataset=dataset,
                 generator=generator,
             )
-            for dataset in datasets
-        ]
+            dloaders.append(dloader)
+        return dloaders
 
     def get_statistics(self, dataset: str = "train", dataset_idx: int = 0):
         """

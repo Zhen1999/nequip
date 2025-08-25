@@ -21,6 +21,7 @@ from .ema import EMALightningModule
 from .config import ConFIGLightningModule, EMAConFIGLightningModule
 from .simple_ddp import SimpleDDPStrategy
 from .schedulefree import ScheduleFreeLightningModule
+from .efh_full_module import EFHFullHessianLightningModule
 
 __all__ = [
     "NequIPLightningModule",
@@ -28,6 +29,7 @@ __all__ = [
     "ConFIGLightningModule",
     "EMAConFIGLightningModule",
     "ScheduleFreeLightningModule",
+    "EFHFullHessianLightningModule",
     "MetricsManager",
     "EnergyForceLoss",
     "EnergyForceMetrics",

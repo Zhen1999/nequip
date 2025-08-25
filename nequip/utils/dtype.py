@@ -98,8 +98,20 @@ def test_model_output_similarity_by_dtype(
         out1 = model1(data.copy())
         out2 = model2(data.copy())
         for k in fields:
-            out1_list[k].append(out1[k].detach().double())
-            out2_list[k].append(out2[k].detach().double())
+            t1 = out1[k].detach()
+            t2 = out2[k].detach()
+            # Move to CPU before any dtype cast to avoid backend restrictions
+            # (e.g., Apple MPS does not support float64 on device).
+            if t1.is_floating_point():
+                t1 = t1.to(device="cpu", dtype=torch.float64)
+            else:
+                t1 = t1.to(device="cpu")
+            if t2.is_floating_point():
+                t2 = t2.to(device="cpu", dtype=torch.float64)
+            else:
+                t2 = t2.to(device="cpu")
+            out1_list[k].append(t1)
+            out2_list[k].append(t2)
         del out1, out2
 
     for k in fields:

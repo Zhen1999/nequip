@@ -1,0 +1,155 @@
+run: [train, val]
+
+# This config trains on EXTXYZ files that embed per-atom Hessian blocks as a variable-width array.
+# Key non-standard components in this repo (added during this work):
+# - nequip.data.transforms.RegisterKeys: registers custom fields (here: node field 'hessian') so
+#   they can be carried through AtomicData and Dataloaders, including in multiprocessing workers.
+# - nequip.data.datamodule._collate.hessian_pad_collate_factory: pads the per-atom Hessian to a
+#   uniform width per-batch at collate time (9*K where K=max atoms in the batch), avoiding dataset-wide
+#   padding and saving I/O.
+# - nequip.data.BucketByNumAtomsBatchSampler: groups frames with similar atom counts into the same batch
+#   to minimize padding and improve efficiency when using variable-size structures.
+# - nequip.train.EFHFullHessianLightningModule: training module that adds Hessian supervision/regularization
+#   by computing the model’s full Hessian (via autograd) and comparing to the target.
+
+# Basic hyperparams
+cutoff_radius: 5.0
+num_layers: 3
+l_max: 1
+num_features: 32
+
+chemical_symbols: [O, C, N, H]
+model_type_names: ${chemical_symbols}
+monitored_metric: val0_epoch/weighted_sum
+
+data:
+  _target_: nequip.data.datamodule.ASEDataModule
+  seed: 456
+
+  train_file_path:
+  - ../archive/ts1x_hess_train_big.sub200.extxyz
+  val_file_path:
+  - ../archive/ts1x-val.sub200.extxyz
+
+  transforms:
+    - _target_: nequip.data.transforms.ChemicalSpeciesToAtomTypeMapper
+      chemical_symbols: ${chemical_symbols}
+    - _target_: nequip.data.transforms.NeighborListTransform
+      r_max: ${cutoff_radius}
+    # RegisterKeys (non-stock extension): ensure custom field 'hessian' is known to the key registry.
+    # Our EXTXYZ stores per-atom Hessian rows with shape (N, 9*K):
+    #   - Default converter writes variable width (K=N per-frame); collate will pad to the batch max.
+    #   - If the converter was run with --pad-hessian, K is the dataset-global n_max.
+    # Treat it as a node field so it aligns with atoms during batching/collation.
+    - _target_: nequip.data.transforms.RegisterKeys
+      node_fields: [hessian]
+  # Include the 'hessian' field when reading from ASE files into AtomicData.
+  include_keys: [hessian]
+
+  train_dataloader:
+    _target_: torch.utils.data.DataLoader
+    num_workers: 4
+    # Collate-time Hessian padding (non-stock extension):
+    # Pads each frame’s Hessian to 9*K where K is the largest atom count in the current batch.
+    # This reduces memory and I/O vs. dataset-global padding and supports batch_size>1.
+    collate_fn:
+      _target_: nequip.data.datamodule._collate.hessian_pad_collate_factory
+      hessian_key: hessian
+    # Bucketed batching by number of atoms (non-stock extension):
+    # Batches frames with similar sizes together to reduce padding.
+    batch_sampler:
+      _target_: nequip.data.BucketByNumAtomsBatchSampler
+      batch_size: 4
+      bucket_width: 4
+      shuffle: true
+      drop_last: false
+  val_dataloader:
+    _target_: torch.utils.data.DataLoader
+    num_workers: 2
+    # Use the same Hessian-aware collate for validation; no shuffling in the sampler.
+    collate_fn:
+      _target_: nequip.data.datamodule._collate.hessian_pad_collate_factory
+      hessian_key: hessian
+    batch_sampler:
+      _target_: nequip.data.BucketByNumAtomsBatchSampler
+      batch_size: 4
+      bucket_width: 4
+      shuffle: false
+      drop_last: false
+
+  stats_manager:
+    _target_: nequip.data.CommonDataStatisticsManager
+    dataloader_kwargs:
+      batch_size: 8
+    type_names: ${model_type_names}
+
+trainer:
+  _target_: lightning.Trainer
+  accelerator: cpu
+  max_epochs: 2
+  log_every_n_steps: 10
+
+  logger:
+    _target_: lightning.pytorch.loggers.wandb.WandbLogger
+    project: nequip
+    name: ts1x_xyz_subset
+    save_dir: ${hydra:runtime.output_dir}
+
+training_module:
+  # EFHFullHessianLightningModule (non-stock extension): adds Hessian loss alongside energy/forces.
+  # Target semantics:
+  # - Accepts (D,D), flat (D*D), (N,3,N,3), or the per-atom padded form (N, 9*K) read from EXTXYZ.
+  # - Here we pass the per-atom padded form via hessian_target_key: hessian.
+  _target_: nequip.train.EFHFullHessianLightningModule
+  hessian_weight: 0.05
+  hessian_supervised: true
+  hessian_target_key: hessian
+
+  loss:
+    _target_: nequip.train.EnergyForceLoss
+    per_atom_energy: true
+    coeffs:
+      total_energy: 1.0
+      forces: 1.0
+
+  val_metrics:
+    _target_: nequip.train.EnergyForceMetrics
+    coeffs:
+      total_energy_mae: 1.0
+      forces_mae: 1.0
+  train_metrics: ${training_module.val_metrics}
+  test_metrics: ${training_module.val_metrics}
+
+  optimizer:
+    _target_: torch.optim.Adam
+    lr: 0.01
+
+  lr_scheduler:
+    scheduler:
+      _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+      factor: 0.6
+      patience: 5
+      threshold: 0.2
+      min_lr: 1e-6
+    monitor: ${monitored_metric}
+    interval: epoch
+    frequency: 1
+
+  model:
+    _target_: nequip.model.NequIPGNNModel
+    seed: 456
+  model_dtype: float32  # Keep float32 for speed; Hessian autograd still operates correctly.
+    type_names: ${model_type_names}
+    r_max: ${cutoff_radius}
+    num_layers: ${num_layers}
+    l_max: ${l_max}
+    parity: true
+    num_features: ${num_features}
+    num_bessels: 8
+    radial_mlp_depth: 2
+    radial_mlp_width: 64
+    avg_num_neighbors: ${training_data_stats:num_neighbors_mean}
+    per_type_energy_scales: ${training_data_stats:per_type_forces_rms}
+    per_type_energy_shifts: ${training_data_stats:per_atom_energy_mean}
+    per_type_energy_scales_trainable: false
+    per_type_energy_shifts_trainable: false
